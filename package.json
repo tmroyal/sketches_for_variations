@@ -1,0 +1,22 @@
+{
+  "name": "sketches",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tmroyal/sketches_for_variations.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tmroyal/sketches_for_variations/issues"
+  },
+  "homepage": "https://github.com/tmroyal/sketches_for_variations#readme",
+  "dependencies": {
+    "@types/webaudioapi": "^0.0.27"
+  }
+}
