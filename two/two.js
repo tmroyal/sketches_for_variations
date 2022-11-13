@@ -1,10 +1,16 @@
 import * as THREE from 'three';
 
+
 // CONSTS
 const CAMERA_POSITION = 30;
 const TWOPI = Math.PI*2;
 const MAG = new THREE.Vector3(8, 8, 4);
 const CENTER = new THREE.Vector3(0,0,6);
+const W = 3.8;
+const N = 3;
+const Z_AMP = 6;
+const freq = 0.1;
+
 
 // --- TEX GEN
 const colorInd = (x, y, width) => {
@@ -44,6 +50,7 @@ function generatePock(data, cw, ch){
   }
 }
 
+// TODO: a big texture that we take small segments from at random
 function createTexture(){
   const w = 512;
   const h = 512;
@@ -60,7 +67,7 @@ function createTexture(){
       data[ind+3] = 255;
     }
   } 
-  for (let i = 0; i < 700; i++){
+  for (let i = 0; i < 600; i++){
     generatePock(data, w, h);
   }
   let result = new THREE.DataTexture(data, w, h);
@@ -74,7 +81,14 @@ function createTexture(){
 const AudioContext = window.AudioContext || window.webkitAudioContext;
 const audioCtx = new AudioContext();
 audioCtx.suspend();
+await audioCtx.audioWorklet.addModule('./noise.js');
 
+const conv = audioCtx.createConvolver();
+
+const ir = await fetch('./reverb.wav');
+const ab = await ir.arrayBuffer();
+conv.buffer = await audioCtx.decodeAudioData(ab);
+conv.connect(audioCtx.destination);
 
 
 // setup
@@ -82,12 +96,17 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera( 75, window.innerWidth / window.innerHeight, 0.1, 1000 );
 const renderer = new THREE.WebGLRenderer();
 renderer.setSize( window.innerWidth, window.innerHeight );
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
 const clock = new THREE.Clock();
 
 camera.position.z = CAMERA_POSITION;
 
-// light 
+// LGITHS
+
+const MIN_RD = 0.1;
+const PAN_FAC = N*W+W/2;
+
 function vsine(vec){
   return new THREE.Vector3(
     Math.sin(vec.x),
@@ -97,7 +116,7 @@ function vsine(vec){
 }
 
 class Light{
-  constructor(scene){
+  constructor(scene, audioCtx, dest){
     this.freq = new THREE.Vector3();
     window.a = this.freq;
     this.freq.random()
@@ -118,26 +137,135 @@ class Light{
     this.setLightPosition();
     scene.add( this.light );
 
+    this.noiseSource = new AudioWorkletNode( audioCtx, 'noise-processor');
+    this.filtered = new BiquadFilterNode(audioCtx, {
+      type: 'bandpass',
+      Q: 10,
+      frequency: 500
+    });
+    this.noiseSource.connect(this.filtered);
+    this.panner = new StereoPannerNode(audioCtx, {
+      pan: this.light.position.x/MAG.x, channelCount: 2
+    });  
+    this.panner.connect(dest);
+
+    this.plane = null;
+    this.sonifier = null;
+  }
+  
+  findPlane(){
+    let x = this.getCoord(this.light.position.x);
+    let y = this.getCoord(this.light.position.y);
+    const ind = y*(N*2+1)+x;
+    if (ind >= 0 && ind < planes.length){
+      return planes[ind];
+    }
+  }
+  
+  rDist(p1, p2){
+    const d = p1.z - p2.z;
+    return 1/(d*d); 
+  }
+  
+  // we rely on globals W and N
+  getCoord(v){
+    return Math.floor((v/W)+N);
   }
   
   setLightPosition(){
     this.light.position.copy(vsine(this.phase).multiply(MAG).add(CENTER));
   }
 
-  update(dt){
+  sonify(ctx){
+    const newPlane = this.findPlane();
+    // todo
+    if (this.plane !== newPlane){
+      if (this.sonifier){
+        this.sonifier.release(ctx);
+      }
+      this.sonifier = null;
+      this.plane = newPlane;
+    }
+    if (!this.plane){ return; }
+
+    const RD = this.rDist(this.plane.getPosition(), this.light.position);
+
+    if (RD < MIN_RD && this.sonifier){
+      this.sonifier.release(ctx);
+      this.sonifier = null;
+    } else if (RD >= MIN_RD){
+      if (!this.sonifier){
+        this.sonifier = new PlaneSonification(ctx, this.plane.getFreq(), this.filtered, this.panner);
+      }
+      this.sonifier.setDist(RD, ctx);
+    }
+    this.panner.pan.linearRampToValueAtTime(
+      this.light.position.x/PAN_FAC,
+      1/30
+    )
+
+  }
+
+  update(dt, ctx){
     this.phase.add(
       this.freq.clone().multiplyScalar(dt)
     );
     this.setLightPosition();
+    this.sonify(ctx);
   }
 }
 
+const REL = 2;
+
+const MAX_AMP = 1/3;
+
+class PlaneSonification {
+  constructor(ctx, freq, source, dest){
+    const n = Math.random() * 4 + 3;
+    this.filters = [];
+    this.gain = new GainNode(ctx);
+    this.gain.connect(dest);
+
+    for (let i = 0; i < n; i++){
+      let overtone = Math.floor(Math.random()*12) + 1;
+      let filter = new BiquadFilterNode(ctx, {
+        type: 'bandpass',
+        Q: Math.random()*2000+500,
+        frequency: freq*overtone
+      });
+      source.connect(filter);
+      filter.connect(this.gain);
+    }
+  }
+
+  release(ctx){
+    // turn off audio and disconnect
+    this.gain.gain.linearRampToValueAtTime(0, ctx.currentTime + REL);
+    setTimeout(()=>{
+      this.gain.disconnect();      
+      this.filters.forEach((f)=>{ f.disconnect(); });
+    },REL*1000*2);
+  }
+
+  setDist(rd, ctx){
+    if (rd > MAX_AMP){ rd = MAX_AMP; }
+    this.gain.gain.linearRampToValueAtTime(rd*150, ctx.currentTime + 1/30.0);
+  }
+}
 
 // PLANE
 
-const W = 3.8;
-const Z_AMP = 6;
-const freq = 0.1;
+const SCALE = [0, 2, 3, 7, 8, 10];
+
+function planeFreq(x, y){
+  // TODO: maybe pick a scale? Also vary over time
+  // Maybe we could do two freqs that somehow choose over two roots
+  const note = SCALE[Math.abs(Math.floor((x %  5) * ( y % 3) + (y % 7) * (x % 2)) % SCALE.length)];
+  const oct = Math.abs(Math.floor((x*y) % 3)) + 4;
+  const midi = note + 12*oct;
+  return 440*Math.pow(2, (midi-68)/12);
+}
+
 
 class Plane {
   constructor(x, y, w, scene){
@@ -150,6 +278,7 @@ class Plane {
     const geometry = new THREE.PlaneGeometry( W , W );
     this.mesh = new THREE.Mesh(geometry, material);
     this.z_ph = Math.random()*TWOPI;
+    this.freq = planeFreq(x, y);
 
     this.mesh.position.copy(
       new THREE.Vector3(
@@ -163,19 +292,27 @@ class Plane {
     this.z_ph += dt*freq*TWOPI;
     this.mesh.position.z = Math.sin(this.z_ph)*Z_AMP;
   }
+
+  getFreq(){
+    return this.freq;
+  }
+
+  getPosition(){
+    return this.mesh.position;
+  }
 }
 
 // instantiation
 const planes = [];
-for (let x = -5; x <= 5; x++){
-  for (let y = -5; y <= 5; y++){
+for (let x = -N; x <= N; x++){
+  for (let y = -N; y <= N; y++){
     planes.push( new Plane(x, y, W, scene) );
   }
 }
 
 const lights = Array.from(
-  new Array(12),
-  ()=>{ return new Light(scene);}
+  new Array(8),
+  ()=>{ return new Light(scene, audioCtx, conv);}
 )
 
 // animation
@@ -185,13 +322,13 @@ let oldtime = clock.getElapsedTime();
 function animate() {
   const time = clock.getElapsedTime();
   const delta = time-oldtime;
-  lights.forEach((l)=>{l.update(delta)});
+  lights.forEach((l)=>{l.update(delta, audioCtx)});
   planes.forEach((p)=>{p.update(delta)})
 	requestAnimationFrame( animate );
-	renderer.render( scene, camera );
+	renderer.render(scene, camera );
   oldtime = time;
 }
-
+document.getElementById('loadscreen').innerText = 'Click to view';
 // start
 document.body.addEventListener('click', ()=>{
   document.getElementById('loadscreen').remove();
@@ -200,3 +337,7 @@ document.body.addEventListener('click', ()=>{
   animate();
 
 });
+
+// audio: the light interacting with each plane creates a noise going through a filter
+// ringing, with center frequencies changing slowly as time goes on, and initiating and releasing
+// clearing memery
